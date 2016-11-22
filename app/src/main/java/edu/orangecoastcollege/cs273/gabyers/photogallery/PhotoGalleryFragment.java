@@ -7,6 +7,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.nfc.Tag;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
@@ -16,8 +17,12 @@ import android.support.v4.app.Fragment;
 import android.support.v4.content.ContextCompat;
 import android.support.v7.widget.GridLayoutManager;
 import android.support.v7.widget.RecyclerView;
+import android.support.v7.widget.SearchView;
 import android.util.Log;
 import android.view.LayoutInflater;
+import android.view.Menu;
+import android.view.MenuInflater;
+import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
@@ -59,34 +64,31 @@ public class PhotoGalleryFragment extends Fragment {
 
         //attach fragment to activity
         setRetainInstance(true);
+        //allow for Menu callbackcs
+        setHasOptionsMenu(true);
 
-        new FetchItems().execute();
+        updateItems();
+//        new FetchItems().execute();
 
         Handler responsehandler = new Handler();
 
-        //initiaize the Thread and start it
+        //initiaize Thread class (class extending HandlerThread) with a Handler (for responses)
         mThumbnailDownloader = new ThumbnailDownloader<>(responsehandler);
-        mThumbnailDownloader.setThumbnailDownloadeListener(new ThumbnailDownloader.ThumbnailDownloadListener<PhotoHolder>() {
+        mThumbnailDownloader.setThumbnailDownloadListener(new ThumbnailDownloader.ThumbnailDownloadListener<PhotoHolder>() {
             @Override
             public void onThumbnailDownloaded(PhotoHolder target, Bitmap thumbnail) {
                 Drawable drawable = new BitmapDrawable(getResources(), thumbnail);
+
+                //this is the front end of the app using the PhotoHolder object's method (bindDrawable) to attach the actual image
                 target.bindDrawable(drawable);
             }
         });
+
         mThumbnailDownloader.start();
         //need looper for background thread  (.getLooper)
         mThumbnailDownloader.getLooper();
         Log.i(TAG, "Background thread started");
     }
-
-    @Override
-    public void onDestroy() {
-        super.onDestroy();
-        //stop the background thread (.quit)
-        mThumbnailDownloader.quit();
-        Log.i(TAG, "Background thread destroyed with .quit()");
-    }
-
     @Override
     public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstance) {
         View v = inflater.inflate(R.layout.fragment_photo_gallery, container, false);
@@ -99,35 +101,97 @@ public class PhotoGalleryFragment extends Fragment {
 
         return v;
     }
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        //stop the background thread (.quit)
+        mThumbnailDownloader.quit();
+        Log.i(TAG, "Background thread destroyed with .quit()");
+    }
+
+    @Override
+    public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
+        super.onCreateOptionsMenu(menu, inflater);
+        inflater.inflate(R.menu.fragment_photo_gallery, menu);
+
+        //reference for MenuItem (SearchView needs a menu item, think of it as digging in to provided Menu
+        // to get a SearchView reference)
+        MenuItem searchItem = menu.findItem(R.id.menu_item_search);
+        final SearchView searchView = (SearchView) searchItem.getActionView();
+
+        searchView.setOnQueryTextListener(new SearchView.OnQueryTextListener(){
+            @Override
+            public boolean onQueryTextSubmit(String query) {
+                Log.d(TAG, "QueryTextSubmit: " + query);
+                QueryPreferences.setStoredQuery(getActivity(), query);
+                updateItems();
+                return true;
+            }
+
+            @Override
+            public boolean onQueryTextChange(String newText) {
+                Log.d(TAG, "QueryTextChange: " + newText);
+                return false;
+            }
+        });
+
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        switch(item.getItemId()){
+            case R.id.menu_item_clear:
+                QueryPreferences.setStoredQuery(getActivity(), null);
+                updateItems();
+                return true;
+            default: return super.onOptionsItemSelected(item);
+        }
+    }
+
+    private void updateItems(){
+        String query = QueryPreferences.getStoredQuery(getActivity());
+        new FetchItemsTask(query).execute();
+    }
+
+    @Override
+    public void onDestroyView() {
+        super.onDestroyView();
+        mThumbnailDownloader.clearQueue();
+    }
 
     private void setupAdapter(){
         if(isAdded())
             mPhotoRecyclerView.setAdapter( new PhotoAdapter(arrayList));
     }
-
+//Class Creates the PhotoAdapter (essentially this is what is being seen)
     private class PhotoAdapter extends RecyclerView.Adapter<PhotoHolder> {
+
         private List<GalleryItem> mGalleryItemList;
 
         public PhotoAdapter(List<GalleryItem> galleryItems) {
             mGalleryItemList = galleryItems;
         }
 
-
+    //inflate layout (return view)
         @Override
         public PhotoHolder onCreateViewHolder(ViewGroup parent, int viewType) {
-          LayoutInflater inflater = LayoutInflater.from(getActivity());
+            LayoutInflater inflater = LayoutInflater.from(getActivity());
             View view = inflater.inflate(R.layout.gallery_item, parent, false);
             return new PhotoHolder(view);
         }
 
         @Override
         public void onBindViewHolder(PhotoHolder holder, int position) {
+
             GalleryItem gItem = mGalleryItemList.get(position);
 
-            Drawable placeHolder = getResources().getDrawable(R.drawable.battlefield);
-            holder.bindDrawable(placeHolder);
+//            Drawable placeHolder = getResources().getDrawable(R.drawable.battlefield);
+//            holder.bindDrawable(placeHolder);
 
-            mThumbnailDownloader.queueThumbbnail(holder, gItem.getUrl());
+            //method queueThumbnail(T target, String url) adds the parameters to Thread-ready hashMap(Target, Url)
+            //it uses Thumdnlder.. instance variable requesthandler to .obtainMessage() and .sendToTarget
+            //remeber Target is only the container and yes the url is the oic but this will now have to be
+            mThumbnailDownloader.queueThumbnail(holder, gItem.getUrl());
 
         }
 
@@ -137,30 +201,8 @@ public class PhotoGalleryFragment extends Fragment {
         }
     }
 
-    //class for Background task because android doesnt allow internet task on main thread
-    private class FetchItems extends AsyncTask<Void, Void, List<GalleryItem>> {
-        //implement interface method
-        @Override
-        protected List<GalleryItem> doInBackground(Void... params) {
-//            try{
-//                String result = new FlickrFetcher()
-//                        .getUrlString("https://www.google.com");
-//                Log.i(TAG, "Fetched contents of URL: " + result);
-//            }catch(IOException e){
-//                Log.e(TAG, "Failed to fetch URL: ", e);
-//            }return null;
-            return new FlickrFetcher().fetchItems();
-
-        }
-
-        @Override
-        protected void onPostExecute(List<GalleryItem> items) {
-            arrayList =  items;
-            setupAdapter();
-        }
-    }
-
     private class PhotoHolder extends RecyclerView.ViewHolder {
+
         private ImageView mImage;
 
         public PhotoHolder(View itemView) {
@@ -173,11 +215,7 @@ public class PhotoGalleryFragment extends Fragment {
         }
     }
 
-    @Override
-    public void onDestroyView() {
-        super.onDestroyView();
-        mThumbnailDownloader.clearQueue();
-    }
+
     //    ArrayList<String> permList = new ArrayList<>();
 //
 //    //start by seeing if we have permisson to camera
@@ -209,6 +247,38 @@ public class PhotoGalleryFragment extends Fragment {
 //        startActivityForResult(galleryIntent, CONSTANT);
 //    }else
 //            Toast.makeText(this, "set Permisions",Toast.LENGTH_LONG);
+    //class for Background task because android doesnt allow internet task on main thread
+    private class FetchItemsTask extends AsyncTask<Void, Void, List<GalleryItem>> {
+        //implement interface method
+        private String mQuery;
 
+        public FetchItemsTask(String query){
+            mQuery = query;
+        }
+        @Override
+        protected List<GalleryItem> doInBackground(Void... params) {
+//            try{
+//                String result = new FlickrFetcher()
+//                        .getUrlString("https://www.google.com");
+//                Log.i(TAG, "Fetched contents of URL: " + result);
+//            }catch(IOException e){
+//                Log.e(TAG, "Failed to fetch URL: ", e);
+//            }return null;
+
+
+            //return new FlickrFetcher().fetchItems();
+
+
+            if(mQuery == null) return new FlickrFetcher().fetchRecentPhotos();
+            else
+                return new FlickrFetcher().searchPhotos(mQuery);
+        }
+
+        @Override
+        protected void onPostExecute(List<GalleryItem> items) {
+            arrayList =  items;
+            setupAdapter();
+        }
+    }
 
 }
